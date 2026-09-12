@@ -8,6 +8,12 @@ function pickSnippet(lang: Language): string {
     return list[Math.floor(Math.random() * list.length)];
 }
 
+function getAutoIndentCharCount(text: string): number {
+    const matches = text.match(/\n[ \t]+/g);
+    if (!matches) return 0;
+    return matches.reduce((acc, m) => acc + (m.length - 1), 0);
+}
+
 export default function PracticePage() {
     const [lang, setLang] = useState<Language>("typescript");
     const [snippet, setSnippet] = useState(() => pickSnippet("typescript"));
@@ -17,23 +23,50 @@ export default function PracticePage() {
     const [mistakes, setMistakes] = useState(0);
     const [isIdle, setIsIdle] = useState(false);
     const [tabToRestart, setTabToRestart] = useState(false);
-    const [bestWpm, setBestWpm] = useState(() => {
-        const stored = localStorage.getItem("bestWpm");
-        return stored ? parseInt(stored, 10) : 0;
+    const [bestWpm, setBestWpm] = useState<number>(() => {
+        try {
+            const stored = localStorage.getItem("bestWpm");
+            if (!stored) return 0;
+            const parsed = parseInt(stored, 10);
+            return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+        } catch {
+            return 0;
+        }
     });
     
+    const startTimeRef = useRef<number | null>(null);
     const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const cursorRef = useRef<HTMLDivElement>(null);
 
-    const wpm = elapsed > 0 ? Math.round(typed.length / 5 / (elapsed / 60)) : 0;
+    // Auto-indent characters that were inserted automatically and not manually typed
+    const autoIndentChars = getAutoIndentCharCount(typed);
+    const manualCharsTyped = Math.max(0, typed.length - autoIndentChars);
 
-    const accuracy = typed.length === 0 ? 100 : Math.round(((typed.length - mistakes) / typed.length) * 100);
+    // Calculate correctly typed characters excluding auto-indent
+    let correctChars = 0;
+    for (let i = 0; i < typed.length; i++) {
+        if (typed[i] === snippet[i]) {
+            correctChars++;
+        }
+    }
+    const netCorrectChars = Math.max(0, correctChars - autoIndentChars);
+
+    // Accurate WPM: based on net correct characters actually typed, ignoring auto-indent
+    // Only display after 2.5 seconds and at least 3 characters to prevent division spikes
+    const wpm = elapsed >= 2.5 && manualCharsTyped >= 3 
+        ? Math.max(0, Math.round((netCorrectChars / 5) / (elapsed / 60))) 
+        : 0;
+
+    const accuracy = manualCharsTyped === 0 
+        ? 100 
+        : Math.max(0, Math.round(((manualCharsTyped - mistakes) / manualCharsTyped) * 100));
 
     const reset = useCallback(
         (newLang?: Language) => {
             if (intervalRef.current) clearInterval(intervalRef.current);
+            startTimeRef.current = null;
             const l = newLang ?? lang;
             setSnippet(pickSnippet(l));
             setTyped("");
@@ -68,26 +101,29 @@ export default function PracticePage() {
         return () => window.removeEventListener("keydown", handleGlobalKeyDown);
     }, []);
 
+    // Wall-clock continuous timer: does NOT pause when searching for keys
     useEffect(() => {
-        if (state === "running" && !isIdle) {
-            let lastTick = Date.now();
+        if (state === "running") {
             intervalRef.current = setInterval(() => {
-                const now = Date.now();
-                setElapsed((e) => e + (now - lastTick) / 1000);
-                lastTick = now;
+                if (startTimeRef.current) {
+                    setElapsed((Date.now() - startTimeRef.current) / 1000);
+                }
             }, 100);
         }
         return () => {
             if (intervalRef.current) clearInterval(intervalRef.current);
         };
-    }, [state, isIdle]);
+    }, [state]);
 
+    // Update Best WPM when a snippet is completed, or during practice once sustained typing has occurred
     useEffect(() => {
-        if (state === "done" && wpm > bestWpm) {
-            setBestWpm(wpm);
-            localStorage.setItem("bestWpm", wpm.toString());
+        if (wpm > 0 && wpm > bestWpm) {
+            if (state === "done" || (elapsed >= 4 && manualCharsTyped >= 15)) {
+                setBestWpm(wpm);
+                localStorage.setItem("bestWpm", wpm.toString());
+            }
         }
-    }, [state, wpm, bestWpm]);
+    }, [state, wpm, bestWpm, elapsed, manualCharsTyped]);
 
     useEffect(() => {
         if (!cursorRef.current || state === "done") return;
@@ -138,6 +174,7 @@ export default function PracticePage() {
         
         if (state === "idle") {
             window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+            startTimeRef.current = Date.now();
             setState("running");
         }
 
@@ -175,6 +212,9 @@ export default function PracticePage() {
             if (next.length >= snippet.length) {
                 setState("done");
                 if (intervalRef.current) clearInterval(intervalRef.current);
+                if (startTimeRef.current) {
+                    setElapsed(Math.max(0.1, (Date.now() - startTimeRef.current) / 1000));
+                }
             }
             return;
         }
@@ -191,6 +231,9 @@ export default function PracticePage() {
         if (next.length >= snippet.length) {
             setState("done");
             if (intervalRef.current) clearInterval(intervalRef.current);
+            if (startTimeRef.current) {
+                setElapsed(Math.max(0.1, (Date.now() - startTimeRef.current) / 1000));
+            }
         }
     };
 
@@ -270,13 +313,30 @@ export default function PracticePage() {
                     {/* Stats */}
                     <div style={{ display: "flex", gap: "24px", alignItems: "center" }}>
                         <StatItem label="WPM" value={state === "idle" ? "—" : `${wpm}`} color="#61AFEF" />
-                        <StatItem label="BEST WPM" value={`${bestWpm}`} color="#E5C07B" />
+                        <StatItem
+                            label="BEST WPM"
+                            value={`${bestWpm}`}
+                            color="#E5C07B"
+                            onClick={() => {
+                                if (bestWpm > 0 && window.confirm("Reset your Best WPM to 0?")) {
+                                    setBestWpm(0);
+                                    localStorage.removeItem("bestWpm");
+                                }
+                            }}
+                            title="Click to reset Best WPM"
+                        />
                         <StatItem
                             label="ACC"
                             value={state === "idle" ? "—" : `${accuracy}%`}
                             color={accuracy >= 90 ? "#4EC994" : "#E06C75"}
                         />
                         <StatItem label="TIME" value={state === "idle" ? "—" : `${elapsed.toFixed(1)}s`} color="#F7F3E3" />
+                        <StatItem
+                            label="CPS"
+                            value={state === "idle" || elapsed < 1 ? "—" : `${(manualCharsTyped / Math.max(0.1, elapsed)).toFixed(1)}`}
+                            color="#56B6C2"
+                            title="Characters typed per second"
+                        />
                         <StatItem
                             label="ERRORS"
                             value={state === "idle" ? "—" : `${mistakes}`}
@@ -473,9 +533,21 @@ export default function PracticePage() {
     );
 }
 
-function StatItem({ label, value, color }: { label: string; value: string; color: string }) {
+function StatItem({
+    label,
+    value,
+    color,
+    onClick,
+    title,
+}: {
+    label: string;
+    value: string;
+    color: string;
+    onClick?: () => void;
+    title?: string;
+}) {
     return (
-        <div>
+        <div onClick={onClick} title={title} style={{ cursor: onClick ? "pointer" : "default" }}>
             <div style={{ color: "#706677", fontSize: "0.65rem", letterSpacing: "0.08em", marginBottom: "2px" }}>
                 {label}
             </div>
