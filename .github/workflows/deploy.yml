@@ -1,12 +1,16 @@
-name: Deploy Frontend to S3 and CloudFront
+name: Deploy to Cloudflare Pages
+
 on:
     push:
         branches:
             - main
 
 jobs:
-    deploy-frontend:
+    deploy:
         runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            deployments: write
         steps:
             - name: Checkout Code
               uses: actions/checkout@v4
@@ -14,7 +18,7 @@ jobs:
             - name: Install pnpm
               uses: pnpm/action-setup@v4
               with:
-                  version: 12.3.4
+                  version: 9
 
             - name: Setup Node.js
               uses: actions/setup-node@v4
@@ -24,28 +28,13 @@ jobs:
 
             - name: Install Dependencies
               run: pnpm install
+
             - name: Build Project
               run: pnpm run build
-              # env:
-              #   Uncomment if you end up adding environment variables later!
-              #   VITE_API_URL: ${{ secrets.VITE_API_URL }}
 
-            - name: Configure AWS Credentials
-              uses: aws-actions/configure-aws-credentials@v4
+            - name: Deploy to Cloudflare Pages
+              uses: cloudflare/wrangler-action@v3
               with:
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                  aws-region: ${{ secrets.AWS_REGION }}
-
-            - name: Deploy to S3
-              run: |
-                  aws s3 sync \
-                  dist \
-                  s3://${{ secrets.S3_BUCKET }} \
-                  --delete
-
-            - name: Invalidate CloudFront Cache
-              run: |
-                  aws cloudfront create-invalidation \
-                  --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
-                  --paths "/*"
+                  apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+                  command: pages deploy dist --project-name=brattype --branch=main
